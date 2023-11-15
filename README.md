@@ -79,6 +79,12 @@ npm run build-windows
 npx -p typescript tsc ./src/index.js --declaration --allowJs --emitDeclarationOnly --outDir build/types
 ```
 
+如果想要私有化部署的话需要把网站设置成https访问并在请求头里添加两个请求头：
+```
+'Cross-Origin-Opener-Policy': 'same-origin',
+'Cross-Origin-Embedder-Policy': 'require-corp'
+```
+
 To view the demo scenes locally run
 ```
 npm run demo
