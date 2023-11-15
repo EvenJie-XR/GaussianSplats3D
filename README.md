@@ -74,6 +74,11 @@ For Windows I have added a Windows-compatible version of the build command:
 ```
 npm run build-windows
 ```
+如果想要build typescript的.d.ts:
+```
+npx -p typescript tsc ./src/index.js --declaration --allowJs --emitDeclarationOnly --outDir build/types
+```
+
 To view the demo scenes locally run
 ```
 npm run demo

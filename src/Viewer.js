@@ -78,6 +78,411 @@ export class Viewer {
 
         this.initialized = false;
         this.init();
+
+        this.onKeyDown = (() => {
+
+            const forward = new THREE.Vector3();
+            const tempMatrixLeft = new THREE.Matrix4();
+            const tempMatrixRight = new THREE.Matrix4();
+
+            return function onKeyDown(e) {
+                forward.set(0, 0, -1);
+                forward.transformDirection(this.camera.matrixWorld);
+                tempMatrixLeft.makeRotationAxis(forward, Math.PI / 128);
+                tempMatrixRight.makeRotationAxis(forward, -Math.PI / 128);
+                switch (e.code) {
+                    case 'ArrowLeft':
+                        this.camera.up.transformDirection(tempMatrixLeft);
+                    break;
+                    case 'ArrowRight':
+                        this.camera.up.transformDirection(tempMatrixRight);
+                    break;
+                    case 'KeyC':
+                        this.showMeshCursor = !this.showMeshCursor;
+                    break;
+                    case 'KeyP':
+                        this.showControlPlane = !this.showControlPlane;
+                    break;
+                    case 'KeyI':
+                        this.showInfo = !this.showInfo;
+                        if (this.showInfo) {
+                            this.infoPanel.style.display = 'block';
+                        } else {
+                            this.infoPanel.style.display = 'none';
+                        }
+                    break;
+                }
+            };
+
+        })();
+        this.onMouseUp = (() => {
+
+            const renderDimensions = new THREE.Vector2();
+            const clickOffset = new THREE.Vector2();
+            const toNewFocalPoint = new THREE.Vector3();
+            const outHits = [];
+
+            return function onMouseUp(mouse) {
+                clickOffset.copy(this.mousePosition).sub(this.mouseDownPosition);
+                const mouseUpTime = getCurrentTime();
+                const wasClick = mouseUpTime - this.mouseDownTime < 0.5 && clickOffset.length() < 2;
+                if (!this.transitioningCameraTarget && wasClick) {
+                    this.getRenderDimensions(renderDimensions);
+                    outHits.length = 0;
+                    this.raycaster.setFromCameraAndScreenPosition(this.camera, this.mousePosition, renderDimensions);
+                    this.mousePosition.set(mouse.offsetX, mouse.offsetY);
+                    this.raycaster.intersectSplatMesh(this.splatMesh, outHits);
+                    if (outHits.length > 0) {
+                        const intersectionPoint = outHits[0].origin;
+                        toNewFocalPoint.copy(intersectionPoint).sub(this.camera.position);
+                        if (toNewFocalPoint.length() > MINIMUM_DISTANCE_TO_NEW_FOCAL_POINT) {
+                            this.previousCameraTarget.copy(this.controls.target);
+                            this.nextCameraTarget.copy(intersectionPoint);
+                            this.transitioningCameraTarget = true;
+                            this.transitioningCameraTargetStartTime = getCurrentTime();
+                        }
+                    }
+                }
+            };
+
+        })();
+        this.updateSplatMeshUniforms = (() => {
+
+            const renderDimensions = new THREE.Vector2();
+
+            return function updateSplatMeshUniforms() {
+                const splatCount = this.splatMesh.getSplatCount();
+                if (splatCount > 0) {
+                    this.getRenderDimensions(renderDimensions);
+                    this.cameraFocalLengthX = this.camera.projectionMatrix.elements[0] *
+                                              this.devicePixelRatio * renderDimensions.x * 0.45;
+                                              this.cameraFocalLengthY = this.camera.projectionMatrix.elements[5] *
+                                              this.devicePixelRatio * renderDimensions.y * 0.45;
+                    this.splatMesh.updateUniforms(renderDimensions, this.cameraFocalLengthX, this.cameraFocalLengthY);
+                }
+            };
+
+        })();
+        this.gatherSceneNodes = (() => {
+
+            const nodeRenderList = [];
+            const tempVectorYZ = new THREE.Vector3();
+            const tempVectorXZ = new THREE.Vector3();
+            const tempVector = new THREE.Vector3();
+            const tempMatrix4 = new THREE.Matrix4();
+            const renderDimensions = new THREE.Vector3();
+            const forward = new THREE.Vector3(0, 0, -1);
+
+            const tempMax = new THREE.Vector3();
+            const nodeSize = (node) => {
+                return tempMax.copy(node.max).sub(node.min).length();
+            };
+
+            const MaximumDistanceToSort = 125;
+            const MaximumDistanceToRender = 125;
+
+            return function gatherSceneNodes(gatherAllNodes) {
+
+                this.getRenderDimensions(renderDimensions);
+                const cameraFocalLength = (renderDimensions.y / 2.0) / Math.tan(this.camera.fov / 2.0 * THREE.MathUtils.DEG2RAD);
+                const fovXOver2 = Math.atan(renderDimensions.x / 2.0 / cameraFocalLength);
+                const fovYOver2 = Math.atan(renderDimensions.y / 2.0 / cameraFocalLength);
+                const cosFovXOver2 = Math.cos(fovXOver2);
+                const cosFovYOver2 = Math.cos(fovYOver2);
+                tempMatrix4.copy(this.camera.matrixWorld).invert();
+                tempMatrix4.multiply(this.splatMesh.matrixWorld);
+
+                const splatTree = this.splatMesh.getSplatTree();
+                let nodeRenderCount = 0;
+                let splatRenderCount = 0;
+                const nodeCount = splatTree.nodesWithIndexes.length;
+                for (let i = 0; i < nodeCount; i++) {
+                    const node = splatTree.nodesWithIndexes[i];
+                    tempVector.copy(node.center).applyMatrix4(tempMatrix4);
+                    const distanceToNode = tempVector.length();
+                    tempVector.normalize();
+
+                    tempVectorYZ.copy(tempVector).setX(0).normalize();
+                    tempVectorXZ.copy(tempVector).setY(0).normalize();
+
+                    const cameraAngleXZDot = forward.dot(tempVectorXZ);
+                    const cameraAngleYZDot = forward.dot(tempVectorYZ);
+
+                    const ns = nodeSize(node);
+                    const outOfFovY = cameraAngleYZDot < (cosFovYOver2 - .5);
+                    const outOfFovX = cameraAngleXZDot < (cosFovXOver2 - .5);
+                    if (!gatherAllNodes && ((outOfFovX || outOfFovY || distanceToNode > MaximumDistanceToRender) && distanceToNode > ns)) {
+                        continue;
+                    }
+                    splatRenderCount += node.data.indexes.length;
+                    nodeRenderList[nodeRenderCount] = node;
+                    node.data.distanceToNode = distanceToNode;
+                    nodeRenderCount++;
+                }
+
+                nodeRenderList.length = nodeRenderCount;
+                nodeRenderList.sort((a, b) => {
+                    if (a.data.distanceToNode < b.data.distanceToNode) return 1;
+                    else return -1;
+                });
+
+                this.splatRenderCount = splatRenderCount;
+                this.splatSortCount = 0;
+                let currentByteOffset = splatRenderCount * Constants.BytesPerInt;
+                for (let i = 0; i < nodeRenderCount; i++) {
+                    const node = nodeRenderList[i];
+                    const shouldSort = node.data.distanceToNode <= MaximumDistanceToSort;
+                    if (shouldSort) {
+                        this.splatSortCount += node.data.indexes.length;
+                    }
+                    const windowSizeInts = node.data.indexes.length;
+                    const windowSizeBytes = windowSizeInts * Constants.BytesPerInt;
+                    let destView = new Uint32Array(this.inIndexArray.buffer, currentByteOffset - windowSizeBytes, windowSizeInts);
+                    destView.set(node.data.indexes);
+                    currentByteOffset -= windowSizeBytes;
+                }
+
+            };
+
+        })();
+        this.updateFPS = (() => {
+
+            let lastCalcTime = getCurrentTime();
+            let frameCount = 0;
+
+            return function updateFPS() {
+                const currentTime = getCurrentTime();
+                const calcDelta = currentTime - lastCalcTime;
+                if (calcDelta >= 1.0) {
+                    this.currentFPS = frameCount;
+                    frameCount = 0;
+                    lastCalcTime = currentTime;
+                } else {
+                    frameCount++;
+                }
+            };
+
+        })();
+        this.timingSensitiveUpdates = (() => {
+
+            let lastUpdateTime;
+
+            return function timingSensitiveUpdates() {
+                const currentTime = getCurrentTime();
+                if (!lastUpdateTime) lastUpdateTime = currentTime;
+                const timeDelta = currentTime - lastUpdateTime;
+
+                this.updateCameraTransition(currentTime);
+                this.updateFocusMarker(timeDelta);
+
+                lastUpdateTime = currentTime;
+            };
+
+        })();
+        this.updateCameraTransition = (() => {
+
+            let tempCameraTarget = new THREE.Vector3();
+            let toPreviousTarget = new THREE.Vector3();
+            let toNextTarget = new THREE.Vector3();
+
+            return function updateCameraTransition(currentTime) {
+                if (this.transitioningCameraTarget) {
+                    toPreviousTarget.copy(this.previousCameraTarget).sub(this.camera.position).normalize();
+                    toNextTarget.copy(this.nextCameraTarget).sub(this.camera.position).normalize();
+                    const rotationAngle = Math.acos(toPreviousTarget.dot(toNextTarget));
+                    const rotationSpeed = rotationAngle / (Math.PI / 3) * .65 + .3;
+                    const t = (rotationSpeed / rotationAngle * (currentTime - this.transitioningCameraTargetStartTime));
+                    tempCameraTarget.copy(this.previousCameraTarget).lerp(this.nextCameraTarget, t);
+                    this.camera.lookAt(tempCameraTarget);
+                    this.controls.target.copy(tempCameraTarget);
+                    if (t >= 1.0) {
+                        this.transitioningCameraTarget = false;
+                    }
+                }
+            };
+
+        })();
+        this.updateMeshCursor = (() => {
+
+            const outHits = [];
+            const renderDimensions = new THREE.Vector2();
+
+            return function updateMeshCursor() {
+                if (this.showMeshCursor) {
+                    this.getRenderDimensions(renderDimensions);
+                    outHits.length = 0;
+                    this.raycaster.setFromCameraAndScreenPosition(this.camera, this.mousePosition, renderDimensions);
+                    this.raycaster.intersectSplatMesh(this.splatMesh, outHits);
+                    if (outHits.length > 0) {
+                        this.sceneHelper.setMeshCursorVisibility(true);
+                        this.sceneHelper.positionAndOrientMeshCursor(outHits[0].origin, this.camera);
+                    } else {
+                        this.sceneHelper.setMeshCursorVisibility(false);
+                    }
+                } else {
+                    this.sceneHelper.setMeshCursorVisibility(false);
+                }
+            };
+
+        })();
+        this.updateForRendererSizeChanges = (() => {
+
+            const lastRendererSize = new THREE.Vector2();
+            const currentRendererSize = new THREE.Vector2();
+
+            return function updateForRendererSizeChanges() {
+                this.renderer.getSize(currentRendererSize);
+                if (currentRendererSize.x !== lastRendererSize.x || currentRendererSize.y !== lastRendererSize.y) {
+                    if (!this.usingExternalCamera) {
+                        this.camera.aspect = currentRendererSize.x / currentRendererSize.y;
+                        this.camera.updateProjectionMatrix();
+                    }
+                    if (this.splatRenderingInitialized) {
+                        this.updateSplatMeshUniforms();
+                    }
+                    lastRendererSize.copy(currentRendererSize);
+                }
+            };
+
+        })();
+        this.updateInfo = (() => {
+
+            const renderDimensions = new THREE.Vector2();
+
+            return function updateInfo() {
+                if (this.showInfo) {
+                    const splatCount = this.splatMesh.getSplatCount();
+                    this.getRenderDimensions(renderDimensions);
+
+                    const cameraPos = this.camera.position;
+                    const cameraPosString = `[${cameraPos.x.toFixed(5)}, ${cameraPos.y.toFixed(5)}, ${cameraPos.z.toFixed(5)}]`;
+                    this.infoPanelCells.cameraPosition.innerHTML = cameraPosString;
+
+                    const cameraLookAt = this.controls.target;
+                    const cameraLookAtString = `[${cameraLookAt.x.toFixed(5)}, ${cameraLookAt.y.toFixed(5)}, ${cameraLookAt.z.toFixed(5)}]`;
+                    this.infoPanelCells.cameraLookAt.innerHTML = cameraLookAtString;
+
+                    const cameraUp = this.camera.up;
+                    const cameraUpString = `[${cameraUp.x.toFixed(5)}, ${cameraUp.y.toFixed(5)}, ${cameraUp.z.toFixed(5)}]`;
+                    this.infoPanelCells.cameraUp.innerHTML = cameraUpString;
+
+                    if (this.showMeshCursor) {
+                        const cursorPos = this.sceneHelper.meshCursor.position;
+                        const cursorPosString = `[${cursorPos.x.toFixed(5)}, ${cursorPos.y.toFixed(5)}, ${cursorPos.z.toFixed(5)}]`;
+                        this.infoPanelCells.cursorPosition.innerHTML = cursorPosString;
+                    } else {
+                        this.infoPanelCells.cursorPosition.innerHTML = 'N/A';
+                    }
+
+                    this.infoPanelCells.fps.innerHTML = this.currentFPS;
+                    this.infoPanelCells.renderWindow.innerHTML = `${renderDimensions.x} x ${renderDimensions.y}`;
+
+                    const renderPct = this.splatRenderCount / splatCount * 100;
+                    this.infoPanelCells.renderSplatCount.innerHTML =
+                        `${this.splatRenderCount} splats out of ${splatCount} (${renderPct.toFixed(2)}%)`;
+
+                    this.infoPanelCells.sortTime.innerHTML = `${this.lastSortTime.toFixed(3)} ms`;
+                }
+            };
+
+        })();
+        this.updateFocusMarker = (() => {
+
+            const renderDimensions = new THREE.Vector2();
+            let wasTransitioning = false;
+
+            return function updateFocusMarker(timeDelta) {
+                this.getRenderDimensions(renderDimensions);
+                const fadeInSpeed = 10.0;
+                const fadeOutSpeed = 2.5;
+                if (this.transitioningCameraTarget) {
+                    this.sceneHelper.setFocusMarkerVisibility(true);
+                    const currentFocusMarkerOpacity = Math.max(this.sceneHelper.getFocusMarkerOpacity(), 0.0);
+                    let newFocusMarkerOpacity = Math.min(currentFocusMarkerOpacity + fadeInSpeed * timeDelta, 1.0);
+                    this.sceneHelper.setFocusMarkerOpacity(newFocusMarkerOpacity);
+                    this.sceneHelper.updateFocusMarker(this.nextCameraTarget, this.camera, renderDimensions);
+                    wasTransitioning = true;
+                } else {
+                    let currentFocusMarkerOpacity;
+                    if (wasTransitioning) currentFocusMarkerOpacity = 1.0;
+                    else currentFocusMarkerOpacity = Math.min(this.sceneHelper.getFocusMarkerOpacity(), 1.0);
+                    if (currentFocusMarkerOpacity > 0) {
+                        this.sceneHelper.updateFocusMarker(this.nextCameraTarget, this.camera, renderDimensions);
+                        let newFocusMarkerOpacity = Math.max(currentFocusMarkerOpacity - fadeOutSpeed * timeDelta, 0.0);
+                        this.sceneHelper.setFocusMarkerOpacity(newFocusMarkerOpacity);
+                        if (newFocusMarkerOpacity === 0.0) this.sceneHelper.setFocusMarkerVisibility(false);
+                    }
+                    wasTransitioning = false;
+                }
+            };
+
+        })();
+        this.render = function render() {
+
+            return function() {
+                const hasRenderables = (scene) => {
+                    for (let child of scene.children) {
+                        if (child.visible) {
+                        return true;
+                        }
+                    }
+                    return false;
+                };
+
+                const savedAuoClear = this.renderer.autoClear;
+                this.renderer.autoClear = false;
+                if (hasRenderables(this.scene)) this.renderer.render(this.scene, this.camera);
+                this.renderer.render(this.splatMesh, this.camera);
+                if (this.sceneHelper.getFocusMarkerOpacity() > 0.0) this.renderer.render(this.sceneHelper.focusMarker, this.camera);
+                if (this.showControlPlane) this.renderer.render(this.sceneHelper.controlPlane, this.camera);
+                this.renderer.autoClear = savedAuoClear;
+            };
+
+        }();
+        this.updateView = function updateView() {
+
+            const tempMatrix = new THREE.Matrix4();
+            const cameraPositionArray = [];
+            const lastSortViewDir = new THREE.Vector3(0, 0, -1);
+            const sortViewDir = new THREE.Vector3(0, 0, -1);
+            const lastSortViewPos = new THREE.Vector3();
+            const sortViewOffset = new THREE.Vector3();
+
+            return function updateView(force = false, gatherAllNodes = false) {
+                if (!force) {
+                    sortViewDir.set(0, 0, -1).applyQuaternion(this.camera.quaternion);
+                    let needsRefreshForRotation = false;
+                    let needsRefreshForPosition = false;
+                    if (sortViewDir.dot(lastSortViewDir) <= 0.95) needsRefreshForRotation = true;
+                    if (sortViewOffset.copy(this.camera.position).sub(lastSortViewPos).length() >= 1.0) needsRefreshForPosition = true;
+                    if (!needsRefreshForRotation && !needsRefreshForPosition) return;
+                }
+
+                tempMatrix.copy(this.camera.matrixWorld).invert();
+                tempMatrix.premultiply(this.camera.projectionMatrix);
+                tempMatrix.multiply(this.splatMesh.matrixWorld);
+                cameraPositionArray[0] = this.camera.position.x;
+                cameraPositionArray[1] = this.camera.position.y;
+                cameraPositionArray[2] = this.camera.position.z;
+
+                if (!this.sortRunning) {
+                    this.gatherSceneNodes(gatherAllNodes);
+                    this.sortRunning = true;
+                    this.sortWorker.postMessage({
+                        sort: {
+                            'view': tempMatrix.elements,
+                            'cameraPosition': cameraPositionArray,
+                            'splatRenderCount': this.splatRenderCount,
+                            'splatSortCount': this.splatSortCount,
+                            'inIndexBuffer': this.inIndexArray.buffer
+                        }
+                    });
+                    lastSortViewPos.copy(this.camera.position);
+                    lastSortViewDir.copy(sortViewDir);
+                }
+            };
+
+        }();
     }
 
     init() {
@@ -150,42 +555,9 @@ export class Viewer {
         this.initialized = true;
     }
 
-    onKeyDown = function() {
+    onKeyDown(e) {
 
-        const forward = new THREE.Vector3();
-        const tempMatrixLeft = new THREE.Matrix4();
-        const tempMatrixRight = new THREE.Matrix4();
-
-        return function(e) {
-            forward.set(0, 0, -1);
-            forward.transformDirection(this.camera.matrixWorld);
-            tempMatrixLeft.makeRotationAxis(forward, Math.PI / 128);
-            tempMatrixRight.makeRotationAxis(forward, -Math.PI / 128);
-            switch (e.code) {
-                case 'ArrowLeft':
-                    this.camera.up.transformDirection(tempMatrixLeft);
-                break;
-                case 'ArrowRight':
-                    this.camera.up.transformDirection(tempMatrixRight);
-                break;
-                case 'KeyC':
-                    this.showMeshCursor = !this.showMeshCursor;
-                break;
-                case 'KeyP':
-                    this.showControlPlane = !this.showControlPlane;
-                break;
-                case 'KeyI':
-                    this.showInfo = !this.showInfo;
-                    if (this.showInfo) {
-                        this.infoPanel.style.display = 'block';
-                    } else {
-                        this.infoPanel.style.display = 'none';
-                    }
-                break;
-            }
-        };
-
-    }();
+    }
 
     onMouseMove(mouse) {
         this.mousePosition.set(mouse.offsetX, mouse.offsetY);
@@ -196,37 +568,9 @@ export class Viewer {
         this.mouseDownTime = getCurrentTime();
     }
 
-    onMouseUp = function() {
+    onMouseUp(mouse) {
 
-        const renderDimensions = new THREE.Vector2();
-        const clickOffset = new THREE.Vector2();
-        const toNewFocalPoint = new THREE.Vector3();
-        const outHits = [];
-
-        return function(mouse) {
-            clickOffset.copy(this.mousePosition).sub(this.mouseDownPosition);
-            const mouseUpTime = getCurrentTime();
-            const wasClick = mouseUpTime - this.mouseDownTime < 0.5 && clickOffset.length() < 2;
-            if (!this.transitioningCameraTarget && wasClick) {
-                this.getRenderDimensions(renderDimensions);
-                outHits.length = 0;
-                this.raycaster.setFromCameraAndScreenPosition(this.camera, this.mousePosition, renderDimensions);
-                this.mousePosition.set(mouse.offsetX, mouse.offsetY);
-                this.raycaster.intersectSplatMesh(this.splatMesh, outHits);
-                if (outHits.length > 0) {
-                    const intersectionPoint = outHits[0].origin;
-                    toNewFocalPoint.copy(intersectionPoint).sub(this.camera.position);
-                    if (toNewFocalPoint.length() > MINIMUM_DISTANCE_TO_NEW_FOCAL_POINT) {
-                        this.previousCameraTarget.copy(this.controls.target);
-                        this.nextCameraTarget.copy(intersectionPoint);
-                        this.transitioningCameraTarget = true;
-                        this.transitioningCameraTargetStartTime = getCurrentTime();
-                    }
-                }
-            }
-        };
-
-    }();
+    }
 
     getRenderDimensions(outDimensions) {
         if (this.rootElement) {
@@ -235,7 +579,7 @@ export class Viewer {
         } else {
             this.renderer.getSize(outDimensions);
         }
-    }
+    };
 
     setupInfoPanel() {
         this.infoPanel = document.createElement('div');
@@ -295,23 +639,9 @@ export class Viewer {
         this.renderer.domElement.parentElement.prepend(this.infoPanel);
     }
 
-    updateSplatMeshUniforms = function() {
+    updateSplatMeshUniforms() {
 
-        const renderDimensions = new THREE.Vector2();
-
-        return function() {
-            const splatCount = this.splatMesh.getSplatCount();
-            if (splatCount > 0) {
-                this.getRenderDimensions(renderDimensions);
-                this.cameraFocalLengthX = this.camera.projectionMatrix.elements[0] *
-                                          this.devicePixelRatio * renderDimensions.x * 0.45;
-                                          this.cameraFocalLengthY = this.camera.projectionMatrix.elements[5] *
-                                          this.devicePixelRatio * renderDimensions.y * 0.45;
-                this.splatMesh.updateUniforms(renderDimensions, this.cameraFocalLengthX, this.cameraFocalLengthY);
-            }
-        };
-
-    }();
+    }
 
     loadFile(fileURL, options = {}) {
         if (options.position) options.position = new THREE.Vector3().fromArray(options.position);
@@ -424,88 +754,9 @@ export class Viewer {
         });
     }
 
-    gatherSceneNodes = function() {
+    gatherSceneNodes(gatherAllNodes) {
 
-        const nodeRenderList = [];
-        const tempVectorYZ = new THREE.Vector3();
-        const tempVectorXZ = new THREE.Vector3();
-        const tempVector = new THREE.Vector3();
-        const tempMatrix4 = new THREE.Matrix4();
-        const renderDimensions = new THREE.Vector3();
-        const forward = new THREE.Vector3(0, 0, -1);
-
-        const tempMax = new THREE.Vector3();
-        const nodeSize = (node) => {
-            return tempMax.copy(node.max).sub(node.min).length();
-        };
-
-        const MaximumDistanceToSort = 125;
-        const MaximumDistanceToRender = 125;
-
-        return function(gatherAllNodes) {
-
-            this.getRenderDimensions(renderDimensions);
-            const cameraFocalLength = (renderDimensions.y / 2.0) / Math.tan(this.camera.fov / 2.0 * THREE.MathUtils.DEG2RAD);
-            const fovXOver2 = Math.atan(renderDimensions.x / 2.0 / cameraFocalLength);
-            const fovYOver2 = Math.atan(renderDimensions.y / 2.0 / cameraFocalLength);
-            const cosFovXOver2 = Math.cos(fovXOver2);
-            const cosFovYOver2 = Math.cos(fovYOver2);
-            tempMatrix4.copy(this.camera.matrixWorld).invert();
-            tempMatrix4.multiply(this.splatMesh.matrixWorld);
-
-            const splatTree = this.splatMesh.getSplatTree();
-            let nodeRenderCount = 0;
-            let splatRenderCount = 0;
-            const nodeCount = splatTree.nodesWithIndexes.length;
-            for (let i = 0; i < nodeCount; i++) {
-                const node = splatTree.nodesWithIndexes[i];
-                tempVector.copy(node.center).applyMatrix4(tempMatrix4);
-                const distanceToNode = tempVector.length();
-                tempVector.normalize();
-
-                tempVectorYZ.copy(tempVector).setX(0).normalize();
-                tempVectorXZ.copy(tempVector).setY(0).normalize();
-
-                const cameraAngleXZDot = forward.dot(tempVectorXZ);
-                const cameraAngleYZDot = forward.dot(tempVectorYZ);
-
-                const ns = nodeSize(node);
-                const outOfFovY = cameraAngleYZDot < (cosFovYOver2 - .5);
-                const outOfFovX = cameraAngleXZDot < (cosFovXOver2 - .5);
-                if (!gatherAllNodes && ((outOfFovX || outOfFovY || distanceToNode > MaximumDistanceToRender) && distanceToNode > ns)) {
-                    continue;
-                }
-                splatRenderCount += node.data.indexes.length;
-                nodeRenderList[nodeRenderCount] = node;
-                node.data.distanceToNode = distanceToNode;
-                nodeRenderCount++;
-            }
-
-            nodeRenderList.length = nodeRenderCount;
-            nodeRenderList.sort((a, b) => {
-                if (a.data.distanceToNode < b.data.distanceToNode) return 1;
-                else return -1;
-            });
-
-            this.splatRenderCount = splatRenderCount;
-            this.splatSortCount = 0;
-            let currentByteOffset = splatRenderCount * Constants.BytesPerInt;
-            for (let i = 0; i < nodeRenderCount; i++) {
-                const node = nodeRenderList[i];
-                const shouldSort = node.data.distanceToNode <= MaximumDistanceToSort;
-                if (shouldSort) {
-                    this.splatSortCount += node.data.indexes.length;
-                }
-                const windowSizeInts = node.data.indexes.length;
-                const windowSizeBytes = windowSizeInts * Constants.BytesPerInt;
-                let destView = new Uint32Array(this.inIndexArray.buffer, currentByteOffset - windowSizeBytes, windowSizeInts);
-                destView.set(node.data.indexes);
-                currentByteOffset -= windowSizeBytes;
-            }
-
-        };
-
-    }();
+    }
 
     start() {
         if (this.selfDrivenMode) {
@@ -523,45 +774,13 @@ export class Viewer {
         }
     }
 
-    updateFPS = function() {
+    updateFPS() {
 
-        let lastCalcTime = getCurrentTime();
-        let frameCount = 0;
+    }
 
-        return function() {
-            const currentTime = getCurrentTime();
-            const calcDelta = currentTime - lastCalcTime;
-            if (calcDelta >= 1.0) {
-                this.currentFPS = frameCount;
-                frameCount = 0;
-                lastCalcTime = currentTime;
-            } else {
-                frameCount++;
-            }
-        };
+    updateForRendererSizeChanges() {
 
-    }();
-
-    updateForRendererSizeChanges = function() {
-
-        const lastRendererSize = new THREE.Vector2();
-        const currentRendererSize = new THREE.Vector2();
-
-        return function() {
-            this.renderer.getSize(currentRendererSize);
-            if (currentRendererSize.x !== lastRendererSize.x || currentRendererSize.y !== lastRendererSize.y) {
-                if (!this.usingExternalCamera) {
-                    this.camera.aspect = currentRendererSize.x / currentRendererSize.y;
-                    this.camera.updateProjectionMatrix();
-                }
-                if (this.splatRenderingInitialized) {
-                    this.updateSplatMeshUniforms();
-                }
-                lastRendererSize.copy(currentRendererSize);
-            }
-        };
-
-    }();
+    }
 
     selfDrivenUpdate() {
         if (this.selfDrivenMode) {
@@ -584,144 +803,25 @@ export class Viewer {
         this.updateControlPlane();
     }
 
-    timingSensitiveUpdates = function() {
+    timingSensitiveUpdates() {
 
-        let lastUpdateTime;
+    }
 
-        return function() {
-            const currentTime = getCurrentTime();
-            if (!lastUpdateTime) lastUpdateTime = currentTime;
-            const timeDelta = currentTime - lastUpdateTime;
+    updateCameraTransition(currentTime) {
 
-            this.updateCameraTransition(currentTime);
-            this.updateFocusMarker(timeDelta);
+    }
 
-            lastUpdateTime = currentTime;
-        };
+    updateFocusMarker(timeDelta) {
 
-    }();
+    }
 
-    updateCameraTransition = function() {
+    updateMeshCursor() {
 
-        let tempCameraTarget = new THREE.Vector3();
-        let toPreviousTarget = new THREE.Vector3();
-        let toNextTarget = new THREE.Vector3();
+    }
 
-        return function(currentTime) {
-            if (this.transitioningCameraTarget) {
-                toPreviousTarget.copy(this.previousCameraTarget).sub(this.camera.position).normalize();
-                toNextTarget.copy(this.nextCameraTarget).sub(this.camera.position).normalize();
-                const rotationAngle = Math.acos(toPreviousTarget.dot(toNextTarget));
-                const rotationSpeed = rotationAngle / (Math.PI / 3) * .65 + .3;
-                const t = (rotationSpeed / rotationAngle * (currentTime - this.transitioningCameraTargetStartTime));
-                tempCameraTarget.copy(this.previousCameraTarget).lerp(this.nextCameraTarget, t);
-                this.camera.lookAt(tempCameraTarget);
-                this.controls.target.copy(tempCameraTarget);
-                if (t >= 1.0) {
-                    this.transitioningCameraTarget = false;
-                }
-            }
-        };
+    updateInfo() {
 
-    }();
-
-    updateFocusMarker = function() {
-
-        const renderDimensions = new THREE.Vector2();
-        let wasTransitioning = false;
-
-        return function(timeDelta) {
-            this.getRenderDimensions(renderDimensions);
-            const fadeInSpeed = 10.0;
-            const fadeOutSpeed = 2.5;
-            if (this.transitioningCameraTarget) {
-                this.sceneHelper.setFocusMarkerVisibility(true);
-                const currentFocusMarkerOpacity = Math.max(this.sceneHelper.getFocusMarkerOpacity(), 0.0);
-                let newFocusMarkerOpacity = Math.min(currentFocusMarkerOpacity + fadeInSpeed * timeDelta, 1.0);
-                this.sceneHelper.setFocusMarkerOpacity(newFocusMarkerOpacity);
-                this.sceneHelper.updateFocusMarker(this.nextCameraTarget, this.camera, renderDimensions);
-                wasTransitioning = true;
-            } else {
-                let currentFocusMarkerOpacity;
-                if (wasTransitioning) currentFocusMarkerOpacity = 1.0;
-                else currentFocusMarkerOpacity = Math.min(this.sceneHelper.getFocusMarkerOpacity(), 1.0);
-                if (currentFocusMarkerOpacity > 0) {
-                    this.sceneHelper.updateFocusMarker(this.nextCameraTarget, this.camera, renderDimensions);
-                    let newFocusMarkerOpacity = Math.max(currentFocusMarkerOpacity - fadeOutSpeed * timeDelta, 0.0);
-                    this.sceneHelper.setFocusMarkerOpacity(newFocusMarkerOpacity);
-                    if (newFocusMarkerOpacity === 0.0) this.sceneHelper.setFocusMarkerVisibility(false);
-                }
-                wasTransitioning = false;
-            }
-        };
-
-    }();
-
-    updateMeshCursor = function() {
-
-        const outHits = [];
-        const renderDimensions = new THREE.Vector2();
-
-        return function() {
-            if (this.showMeshCursor) {
-                this.getRenderDimensions(renderDimensions);
-                outHits.length = 0;
-                this.raycaster.setFromCameraAndScreenPosition(this.camera, this.mousePosition, renderDimensions);
-                this.raycaster.intersectSplatMesh(this.splatMesh, outHits);
-                if (outHits.length > 0) {
-                    this.sceneHelper.setMeshCursorVisibility(true);
-                    this.sceneHelper.positionAndOrientMeshCursor(outHits[0].origin, this.camera);
-                } else {
-                    this.sceneHelper.setMeshCursorVisibility(false);
-                }
-            } else {
-                this.sceneHelper.setMeshCursorVisibility(false);
-            }
-        };
-
-    }();
-
-    updateInfo = function() {
-
-        const renderDimensions = new THREE.Vector2();
-
-        return function() {
-            if (this.showInfo) {
-                const splatCount = this.splatMesh.getSplatCount();
-                this.getRenderDimensions(renderDimensions);
-
-                const cameraPos = this.camera.position;
-                const cameraPosString = `[${cameraPos.x.toFixed(5)}, ${cameraPos.y.toFixed(5)}, ${cameraPos.z.toFixed(5)}]`;
-                this.infoPanelCells.cameraPosition.innerHTML = cameraPosString;
-
-                const cameraLookAt = this.controls.target;
-                const cameraLookAtString = `[${cameraLookAt.x.toFixed(5)}, ${cameraLookAt.y.toFixed(5)}, ${cameraLookAt.z.toFixed(5)}]`;
-                this.infoPanelCells.cameraLookAt.innerHTML = cameraLookAtString;
-
-                const cameraUp = this.camera.up;
-                const cameraUpString = `[${cameraUp.x.toFixed(5)}, ${cameraUp.y.toFixed(5)}, ${cameraUp.z.toFixed(5)}]`;
-                this.infoPanelCells.cameraUp.innerHTML = cameraUpString;
-
-                if (this.showMeshCursor) {
-                    const cursorPos = this.sceneHelper.meshCursor.position;
-                    const cursorPosString = `[${cursorPos.x.toFixed(5)}, ${cursorPos.y.toFixed(5)}, ${cursorPos.z.toFixed(5)}]`;
-                    this.infoPanelCells.cursorPosition.innerHTML = cursorPosString;
-                } else {
-                    this.infoPanelCells.cursorPosition.innerHTML = 'N/A';
-                }
-
-                this.infoPanelCells.fps.innerHTML = this.currentFPS;
-                this.infoPanelCells.renderWindow.innerHTML = `${renderDimensions.x} x ${renderDimensions.y}`;
-
-                const renderPct = this.splatRenderCount / splatCount * 100;
-                this.infoPanelCells.renderSplatCount.innerHTML =
-                    `${this.splatRenderCount} splats out of ${splatCount} (${renderPct.toFixed(2)}%)`;
-
-                this.infoPanelCells.sortTime.innerHTML = `${this.lastSortTime.toFixed(3)} ms`;
-            }
-        };
-
-    }();
+    }
 
     updateControlPlane() {
         if (this.showControlPlane) {
@@ -732,73 +832,13 @@ export class Viewer {
         }
     }
 
-    render = function() {
+    render() {
 
-        return function() {
-            const hasRenderables = (scene) => {
-                for (let child of scene.children) {
-                    if (child.visible) {
-                    return true;
-                    }
-                }
-                return false;
-            };
+    }
 
-            const savedAuoClear = this.renderer.autoClear;
-            this.renderer.autoClear = false;
-            if (hasRenderables(this.scene)) this.renderer.render(this.scene, this.camera);
-            this.renderer.render(this.splatMesh, this.camera);
-            if (this.sceneHelper.getFocusMarkerOpacity() > 0.0) this.renderer.render(this.sceneHelper.focusMarker, this.camera);
-            if (this.showControlPlane) this.renderer.render(this.sceneHelper.controlPlane, this.camera);
-            this.renderer.autoClear = savedAuoClear;
-        };
+    updateView(force = false, gatherAllNodes = false) {
 
-    }();
-
-    updateView = function() {
-
-        const tempMatrix = new THREE.Matrix4();
-        const cameraPositionArray = [];
-        const lastSortViewDir = new THREE.Vector3(0, 0, -1);
-        const sortViewDir = new THREE.Vector3(0, 0, -1);
-        const lastSortViewPos = new THREE.Vector3();
-        const sortViewOffset = new THREE.Vector3();
-
-        return function(force = false, gatherAllNodes = false) {
-            if (!force) {
-                sortViewDir.set(0, 0, -1).applyQuaternion(this.camera.quaternion);
-                let needsRefreshForRotation = false;
-                let needsRefreshForPosition = false;
-                if (sortViewDir.dot(lastSortViewDir) <= 0.95) needsRefreshForRotation = true;
-                if (sortViewOffset.copy(this.camera.position).sub(lastSortViewPos).length() >= 1.0) needsRefreshForPosition = true;
-                if (!needsRefreshForRotation && !needsRefreshForPosition) return;
-            }
-
-            tempMatrix.copy(this.camera.matrixWorld).invert();
-            tempMatrix.premultiply(this.camera.projectionMatrix);
-            tempMatrix.multiply(this.splatMesh.matrixWorld);
-            cameraPositionArray[0] = this.camera.position.x;
-            cameraPositionArray[1] = this.camera.position.y;
-            cameraPositionArray[2] = this.camera.position.z;
-
-            if (!this.sortRunning) {
-                this.gatherSceneNodes(gatherAllNodes);
-                this.sortRunning = true;
-                this.sortWorker.postMessage({
-                    sort: {
-                        'view': tempMatrix.elements,
-                        'cameraPosition': cameraPositionArray,
-                        'splatRenderCount': this.splatRenderCount,
-                        'splatSortCount': this.splatSortCount,
-                        'inIndexBuffer': this.inIndexArray.buffer
-                    }
-                });
-                lastSortViewPos.copy(this.camera.position);
-                lastSortViewDir.copy(sortViewDir);
-            }
-        };
-
-    }();
+    }
 
     getSplatMesh() {
         return this.splatMesh;

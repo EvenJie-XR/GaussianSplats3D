@@ -1,4 +1,4 @@
-import { base64 } from "./util/import-base-64.js";
+import { base64 } from './util/import-base-64.js';
 import terser from '@rollup/plugin-terser';
 
 export default [
@@ -26,7 +26,7 @@ export default [
             }
         ],
         plugins: [
-            base64({ include: "**/*.wasm" })
+            base64({ include: '**/*.wasm' }),
         ]
     },
     {
@@ -51,10 +51,10 @@ export default [
             }
         ],
         plugins: [
-            base64({ 
-                include: "**/*.wasm",
+            base64({
+                include: '**/*.wasm',
                 sourceMap: false
-            })
+            }),
         ]
     }
 ];
