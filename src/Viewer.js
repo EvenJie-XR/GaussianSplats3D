@@ -15,6 +15,8 @@ const MINIMUM_DISTANCE_TO_NEW_FOCAL_POINT = .75;
 
 export class Viewer {
 
+    // 用于stop取消中使用
+    requestAnimationFrameID = undefined;
     constructor(params = {}) {
 
         if (!params.cameraUp) params.cameraUp = [0, 1, 0];
@@ -760,7 +762,7 @@ export class Viewer {
 
     start() {
         if (this.selfDrivenMode) {
-            requestAnimationFrame(this.selfDrivenUpdateFunc);
+            this.requestAnimationFrameID = requestAnimationFrame(this.selfDrivenUpdateFunc);
             this.selfDrivenModeRunning = true;
         } else {
             throw new Error('Cannot start viewer unless it is in self driven mode.');
@@ -769,7 +771,7 @@ export class Viewer {
 
     stop() {
         if (this.selfDrivenMode && this.selfDrivenModeRunning) {
-            cancelAnimationFrame();
+            cancelAnimationFrame(this.requestAnimationFrameID);
             this.selfDrivenModeRunning = false;
         }
     }
@@ -784,7 +786,7 @@ export class Viewer {
 
     selfDrivenUpdate() {
         if (this.selfDrivenMode) {
-            requestAnimationFrame(this.selfDrivenUpdateFunc);
+            this.requestAnimationFrameID = requestAnimationFrame(this.selfDrivenUpdateFunc);
         }
         this.update();
         this.render();
